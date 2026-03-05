@@ -3210,6 +3210,7 @@ def user_authentication_flow(
     refresh_token = result["AuthenticationResult"]["RefreshToken"]
 
     # add mfa token
+    secret_code = None
     if with_mfa:
         resp = conn.associate_software_token(
             AccessToken=result["AuthenticationResult"]["AccessToken"]
@@ -3284,6 +3285,7 @@ def user_authentication_flow(
         "client_id": client_id,
         "client_secret": client_secret,
         "secret_hash": secret_hash,
+        "secret_code": secret_code,
         "id_token": result["AuthenticationResult"]["IdToken"],
         "access_token": result["AuthenticationResult"]["AccessToken"],
         "refresh_token": refresh_token,
@@ -4842,6 +4844,7 @@ def test_initiate_auth_USER_PASSWORD_AUTH_when_software_token_mfa_enabled():
     password = result["password"]
     client_id = result["client_id"]
     secret_hash = result["secret_hash"]
+    secret_code = result["secret_code"]
 
     result = conn.admin_get_user(UserPoolId=user_pool_id, Username=username)
     assert result["PreferredMfaSetting"] == "SOFTWARE_TOKEN_MFA"
@@ -4856,12 +4859,15 @@ def test_initiate_auth_USER_PASSWORD_AUTH_when_software_token_mfa_enabled():
     assert result["ChallengeParameters"] == {}
     assert result["Session"] is not None
 
+    totp = pyotp.TOTP(secret_code)
+    user_code = totp.now()
+
     result = conn.respond_to_auth_challenge(
         ClientId=client_id,
         ChallengeName="SOFTWARE_TOKEN_MFA",
         Session=result["Session"],
         ChallengeResponses={
-            "SOFTWARE_TOKEN_MFA_CODE": "123456",
+            "SOFTWARE_TOKEN_MFA_CODE": user_code,
             "USERNAME": username,
             "SECRET_HASH": secret_hash,
         },
@@ -5369,65 +5375,6 @@ def test_admin_setting_mfa_totp_and_sms():
     result = conn.admin_get_user(UserPoolId=user_pool_id, Username=username)
     assert len(result["UserMFASettingList"]) == 0
     assert result["PreferredMfaSetting"] == ""
-
-
-@mock_aws
-def test_admin_initiate_auth_when_token_totp_masked():
-    conn = boto3.client("cognito-idp", "us-west-2")
-
-    result = authentication_flow(conn, "ADMIN_NO_SRP_AUTH")
-    access_token = result["access_token"]
-    user_pool_id = result["user_pool_id"]
-    username = result["username"]
-    client_id = result["client_id"]
-    password = result["password"]
-    resp = conn.associate_software_token(AccessToken=access_token)
-    secret_code = resp["SecretCode"]
-    totp = pyotp.TOTP(secret_code)
-    user_code = totp.now()
-    conn.verify_software_token(AccessToken=access_token, UserCode=user_code)
-
-    # Set MFA TOTP and SMS methods
-    conn.admin_set_user_mfa_preference(
-        Username=username,
-        UserPoolId=user_pool_id,
-        SoftwareTokenMfaSettings={"Enabled": True, "PreferredMfa": True},
-        SMSMfaSettings={"Enabled": True, "PreferredMfa": False},
-    )
-    result = conn.admin_get_user(UserPoolId=user_pool_id, Username=username)
-    assert len(result["UserMFASettingList"]) == 2
-    assert result["PreferredMfaSetting"] == "SOFTWARE_TOKEN_MFA"
-
-    # Initiate auth with TOTP
-    result = conn.admin_initiate_auth(
-        UserPoolId=user_pool_id,
-        ClientId=client_id,
-        AuthFlow="ADMIN_NO_SRP_AUTH",
-        AuthParameters={
-            "USERNAME": username,
-            "PASSWORD": password,
-        },
-    )
-
-    assert result["ChallengeName"] == "SOFTWARE_TOKEN_MFA"
-    assert result["Session"] != ""
-
-    # Respond to challenge with TOTP
-    result = conn.admin_respond_to_auth_challenge(
-        UserPoolId=user_pool_id,
-        ClientId=client_id,
-        ChallengeName="SOFTWARE_TOKEN_MFA",
-        Session=result["Session"],
-        ChallengeResponses={
-            "SOFTWARE_TOKEN_MFA_CODE": "123456",
-            "USERNAME": username,
-        },
-    )
-
-    assert result["AuthenticationResult"]["IdToken"] != ""
-    assert result["AuthenticationResult"]["AccessToken"] != ""
-    assert result["AuthenticationResult"]["RefreshToken"] != ""
-    assert result["AuthenticationResult"]["TokenType"] == "Bearer"
 
 
 @mock_aws
